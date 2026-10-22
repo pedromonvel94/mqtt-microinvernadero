@@ -14,8 +14,8 @@ import random
 }
 '''
 
-cliente = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
-cliente.connect("localhost", 1883, 60)
+cliente = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2) # Me creo un cliente MQTT con la versión 2 de la API de callbacks
+cliente.connect("localhost", 1883, 60) # Me conecto al broker MQTT en localhost, puerto 1883, con un keepalive de 60 segundos
 
 topic = "emergentes/microinvernadero/ambiente/sim_ambiente_01" #"En el proyecto emergentes, del microinvernadero, datos de ambiente, enviados por el nodo sim_ambiente_01"
 
@@ -64,7 +64,7 @@ while True:
         datos = json.dumps(payload) # Convierte el diccionario payload a una cadena JSON para enviarlo por MQTT
         
         print(f"Enviando datos: {datos}")
-
+        
         comprobante = cliente.publish(topic, datos)
         comprobante.wait_for_publish()
         
