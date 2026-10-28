@@ -3,11 +3,22 @@ import json
 import time
 import statistics
 import os
+import sys
 import psutil
+from concurrent.futures import ProcessPoolExecutor
 from analisis import analizar_ventana
 
-MODO = "secuencial"
-TRABAJADORES = 1
+# Modo: py suscriptor\suscriptor.py secuencial  o  py suscriptor\suscriptor.py paralelo
+if len(sys.argv) > 1:
+    MODO = sys.argv[1]
+else:
+    MODO = "secuencial"
+
+if MODO == "paralelo":
+    TRABAJADORES = 4
+else:
+    TRABAJADORES = 1
+
 VENTANAS_POR_CORRIDA = 10
 ARCHIVO_RESULTADOS = "resultados/resultados.csv"
 
@@ -155,7 +166,11 @@ def on_message(client, userdata, message):
         return
 
     if "samples_g" in mensaje:
-        resultado = analizar_ventana(mensaje["samples_g"])  # Secuencial: se analiza aqui mismo
+        if MODO == "paralelo":
+            tarea = pool.submit(analizar_ventana, mensaje["samples_g"])  # Se la manda a un trabajador
+            resultado = tarea.result()  # Espera el resultado del trabajador
+        else:
+            resultado = analizar_ventana(mensaje["samples_g"])  # Se analiza aqui mismo
         fin = time.perf_counter()  # Cronometro: termina el analisis
 
         tiempo_ms = (fin - inicio) * 1000
@@ -167,6 +182,10 @@ def on_message(client, userdata, message):
 
 
 if __name__ == "__main__":
+    if MODO == "paralelo":
+        pool = ProcessPoolExecutor(max_workers=TRABAJADORES)  # Crea los 4 trabajadores
+        pool.submit(analizar_ventana, [0.0]).result()  # Los arranca antes de que lleguen mensajes
+
     cliente = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
     cliente.on_message = on_message
     cliente.connect("localhost", 1883, 60)
@@ -178,10 +197,12 @@ if __name__ == "__main__":
         with open(ARCHIVO_RESULTADOS, "w") as archivo:
             archivo.write("modo,trabajadores,run_id,mediana_ms,cpu_pct,ventanas_anomalas\n")
 
-    print(f"Suscriptor en modo {MODO} | {VENTANAS_POR_CORRIDA} ventanas por corrida")
+    print(f"Suscriptor en modo {MODO} | {TRABAJADORES} trabajadores | {VENTANAS_POR_CORRIDA} ventanas por corrida")
     print("Escuchando emergentes/microinvernadero/# ... (Ctrl+C para salir)")
     try:
         cliente.loop_forever()
     except KeyboardInterrupt:
         print("Suscriptor detenido.")
         cliente.disconnect()
+        if MODO == "paralelo":
+            pool.shutdown()  # Apaga los trabajadores
