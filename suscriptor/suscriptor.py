@@ -1,7 +1,17 @@
 import paho.mqtt.client as mqtt
 import json
+import time
+import statistics
+import os
+import psutil
+from analisis import analizar_ventana
 
-# Por cada topic conocido: que node_id debe traer y que campos son obligatorios
+MODO = "secuencial"
+TRABAJADORES = 1
+VENTANAS_POR_CORRIDA = 10
+ARCHIVO_RESULTADOS = "resultados/resultados.csv"
+
+# Topics permitidos, con su node_id y sus campos obligatorios
 TEMAS_CONOCIDOS = {
     "emergentes/microinvernadero/ambiente/sim_ambiente_01": {
         "node_id": "sim_ambiente_01",
@@ -13,116 +23,163 @@ TEMAS_CONOCIDOS = {
     }
 }
 
-# Ultimo sequence recibido de cada nodo (y de cada corrida, en el caso de vibracion)
-# Ejemplo: {("sim_vib_01", "secuencial_01"): 4, ("sim_ambiente_01", None): 12}
-ultima_secuencia = {}
+ultima_secuencia = {}   # Ultimo sequence de cada nodo
+corridas_en_curso = {}  # Tiempos y anomalias de cada corrida
 
 
-# Revisa que el mensaje sea correcto. Devuelve (mensaje, None) si esta bien,
-# o (None, motivo) si hay que descartarlo
+# Devuelve el mensaje como diccionario si esta bien, o None si esta malo
 def validar_mensaje(topic, payload):
-    # 1. ¿El topic esta en la lista de TEMAS_CONOCIDOS?
+    # 1. ¿Topic conocido?
     if topic not in TEMAS_CONOCIDOS:
-        return None, "topic desconocido"
+        print(f"[RECHAZADO] {topic} -> topic desconocido")
+        return None
 
-    # 2. ¿Es un JSON valido? (try/except para que un mensaje roto no tumbe el programa)
+    # 2. ¿JSON valido?
     try:
-        mensaje = json.loads(payload)  # Si el texto no es JSON valido, json.loads lanza un error
+        mensaje = json.loads(payload)
     except ValueError:
-        return None, "no es un JSON valido"
+        print(f"[RECHAZADO] {topic} -> no es un JSON valido")
+        return None
 
-    # 2b. ¿El JSON es un objeto {...}? (un JSON tambien puede ser solo un numero o una lista)
+    # 2b. ¿Es un objeto {...}?
     if not isinstance(mensaje, dict):
-        return None, "el JSON no es un objeto {...}"
+        print(f"[RECHAZADO] {topic} -> el JSON no es un objeto {{...}}")
+        return None
 
     esperado = TEMAS_CONOCIDOS[topic]
 
-    # 3. ¿Estan todos los campos obligatorios de este topic?
+    # 3. ¿Estan todos los campos?
     faltan = [campo for campo in esperado["campos"] if campo not in mensaje]
     if faltan:
-        return None, f"faltan campos: {faltan}"
+        print(f"[RECHAZADO] {topic} -> faltan campos: {faltan}")
+        return None
 
-    # 4. ¿El node_id corresponde al topic por el que llego?
+    # 4. ¿El node_id corresponde al topic?
     if mensaje["node_id"] != esperado["node_id"]:
-        return None, f"el node_id '{mensaje['node_id']}' no corresponde a este topic"
+        print(f"[RECHAZADO] {topic} -> el node_id '{mensaje['node_id']}' no corresponde a este topic")
+        return None
 
-    # 5. ¿sequence es un numero entero?
+    # 5. ¿sequence es entero?
     if not isinstance(mensaje["sequence"], int):
-        return None, "sequence no es un numero entero"
+        print(f"[RECHAZADO] {topic} -> sequence no es un numero entero")
+        return None
 
-    # 6. Solo vibracion: ¿samples_g trae exactamente sample_rate_hz (100) numeros?
+    # 6. Vibracion: ¿samples_g trae 100 numeros?
     if "samples_g" in esperado["campos"]:
         muestras = mensaje["samples_g"]
         if not isinstance(muestras, list) or len(muestras) != mensaje["sample_rate_hz"]:
-            return None, f"samples_g debe ser una lista de {mensaje['sample_rate_hz']} muestras"
+            print(f"[RECHAZADO] {topic} -> samples_g debe tener {mensaje['sample_rate_hz']} muestras")
+            return None
         if not all(isinstance(valor, (int, float)) for valor in muestras):
-            return None, "samples_g tiene valores que no son numeros"
+            print(f"[RECHAZADO] {topic} -> samples_g tiene valores que no son numeros")
+            return None
 
-    return mensaje, None
+    return mensaje
 
 
-# Compara el sequence que llego con el anterior del mismo nodo.
-# Devuelve True si el mensaje se puede usar, False si hay que descartarlo
+# Devuelve True si el mensaje se usa, False si se descarta
 def revisar_secuencia(mensaje):
-    clave = (mensaje["node_id"], mensaje.get("run_id"))  # El nodo ambiental no tiene run_id -> None
+    clave = (mensaje["node_id"], mensaje.get("run_id"))
     actual = mensaje["sequence"]
     anterior = ultima_secuencia.get(clave)
 
-    # 0. Primer mensaje de este nodo/corrida: no hay con que comparar -> aceptar
+    # 0. Primer mensaje -> aceptar
     if anterior is None:
         pass
-    # 1. Igual al anterior: es un DUPLICADO -> descartar
+    # 1. Duplicado -> descartar
     elif actual == anterior:
         print(f"  [DUPLICADO] {clave[0]} sequence {actual} ya habia llegado -> descartado")
         return False
-    # 2. Es 1: el nodo se REINICIO -> aceptar y empezar a contar de nuevo
+    # 2. Reinicio -> aceptar
     elif actual == 1:
         print(f"  [AVISO] {clave[0]} volvio a empezar en sequence 1 (el nodo se reinicio)")
-    # 3. Menor que el anterior: llego TARDE (fuera de orden) -> descartar
+    # 3. Fuera de orden -> descartar
     elif actual < anterior:
         print(f"  [FUERA DE ORDEN] {clave[0]} llego sequence {actual} despues de {anterior} -> descartado")
         return False
-    # 4. Mayor que anterior + 1: se PERDIERON mensajes en el camino -> avisar y aceptar
+    # 4. Se perdieron mensajes -> avisar y aceptar
     elif actual > anterior + 1:
         print(f"  [SALTO] {clave[0]} paso de sequence {anterior} a {actual}: "
               f"se perdieron {actual - anterior - 1} mensajes")
+    # 5. Llego el siguiente -> aceptar
 
-    # 5. Si no cayo en ningun caso es porque llego el siguiente esperado (anterior + 1) -> aceptar
-
-    ultima_secuencia[clave] = actual  # Guardo este sequence para compararlo con el proximo
+    ultima_secuencia[clave] = actual
     return True
 
 
+# Anota el tiempo de una ventana y cierra la corrida al llegar a 10
+def registrar_ventana(run_id, sequence, resultado, tiempo_ms):
+    # Primera ventana de la corrida
+    if run_id not in corridas_en_curso:
+        corridas_en_curso[run_id] = {"tiempos_ms": [], "anomalias": []}
+        psutil.cpu_percent()  # Empieza a medir CPU
+
+    corrida = corridas_en_curso[run_id]
+    corrida["tiempos_ms"].append(tiempo_ms)
+    if resultado["etiqueta"] == "anomalia":
+        corrida["anomalias"].append(str(sequence))
+
+    print(f"[VENTANA] {run_id} | sequence {sequence:2} | RMS {resultado['rms']:.5f} | "
+          f"pico {resultado['pico']:.5f} | desviacion {resultado['desviacion']:.5f} | "
+          f"{resultado['etiqueta']:8} | {tiempo_ms:.3f} ms")
+
+    if len(corrida["tiempos_ms"]) == VENTANAS_POR_CORRIDA:
+        cerrar_corrida(run_id)
+
+
+# Saca el resumen, lo guarda en el CSV y borra la corrida
+def cerrar_corrida(run_id):
+    corrida = corridas_en_curso[run_id]
+
+    mediana_ms = round(statistics.median(corrida["tiempos_ms"]), 4)
+    cpu = psutil.cpu_percent()  # CPU promedio durante la corrida
+    anomalias = " ".join(corrida["anomalias"])  # ["3", "7"] -> "3 7"
+
+    print(f"\n===== RESUMEN {run_id} =====")
+    print(f"  Mediana: {mediana_ms} ms/ventana | CPU promedio: {cpu} % | Ventanas con anomalia: {anomalias}\n")
+
+    with open(ARCHIVO_RESULTADOS, "a") as archivo:  # "a" = agregar al final
+        archivo.write(f"{MODO},{TRABAJADORES},{run_id},{mediana_ms},{cpu},{anomalias}\n")
+
+    del corridas_en_curso[run_id]
+
+
 def on_message(client, userdata, message):
-    mensaje, motivo = validar_mensaje(message.topic, message.payload)
+    inicio = time.perf_counter()  # Cronometro: llega el mensaje
+
+    mensaje = validar_mensaje(message.topic, message.payload)
     if mensaje is None:
-        print(f"[RECHAZADO] {message.topic} -> {motivo}")
         return
 
     if not revisar_secuencia(mensaje):
         return
 
     if "samples_g" in mensaje:
-        muestras = mensaje["samples_g"]
-        print(f"[VIBRACION] {mensaje['node_id']} | run {mensaje['run_id']} | "
-              f"sequence {mensaje['sequence']:2} | {len(muestras)} muestras | "
-              f"min {min(muestras):+.3f} | max {max(muestras):+.3f}")
+        resultado = analizar_ventana(mensaje["samples_g"])  # Secuencial: se analiza aqui mismo
+        fin = time.perf_counter()  # Cronometro: termina el analisis
+
+        tiempo_ms = (fin - inicio) * 1000
+        registrar_ventana(mensaje["run_id"], mensaje["sequence"], resultado, tiempo_ms)
     else:
         print(f"[AMBIENTE]  {mensaje['node_id']} | sequence {mensaje['sequence']:2} | "
               f"temperatura {mensaje['temperature_c']} °C | humedad {mensaje['humidity_pct']} % | "
               f"luz {mensaje['light_pct']} %")
 
 
-# Todo lo que arranca el programa va dentro de este if.
-# En la Fase 5 es obligatorio: en Windows los procesos del ProcessPoolExecutor
-# vuelven a leer este archivo y no deben conectarse otra vez a MQTT
 if __name__ == "__main__":
     cliente = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
     cliente.on_message = on_message
     cliente.connect("localhost", 1883, 60)
     cliente.subscribe("emergentes/microinvernadero/#", qos=0)
 
-    print("Suscriptor escuchando emergentes/microinvernadero/# ... (Ctrl+C para salir)")
+    # Crea el CSV con los nombres de las columnas
+    if not os.path.exists(ARCHIVO_RESULTADOS):
+        os.makedirs("resultados", exist_ok=True)
+        with open(ARCHIVO_RESULTADOS, "w") as archivo:
+            archivo.write("modo,trabajadores,run_id,mediana_ms,cpu_pct,ventanas_anomalas\n")
+
+    print(f"Suscriptor en modo {MODO} | {VENTANAS_POR_CORRIDA} ventanas por corrida")
+    print("Escuchando emergentes/microinvernadero/# ... (Ctrl+C para salir)")
     try:
         cliente.loop_forever()
     except KeyboardInterrupt:
