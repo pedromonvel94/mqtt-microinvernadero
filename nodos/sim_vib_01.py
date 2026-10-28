@@ -3,6 +3,7 @@ import math
 import json
 import time
 import random
+import sys
 
 '''
 {
@@ -33,10 +34,33 @@ hz = 100         # muestras por segundo
 frecuencia = 5   # Que tan rapido vibra
 amplitud = 0.02   # Que tan alto vibra
 ruido = 0.005      # Que tan ruidosa es la señal
-ventanas_por_corrida = 10  # Cuantas ventanas de datos voy a generar
 factor_anomalia = 2
 
-random.seed(42) # Establezco la semilla para que la secuencia de números aleatorios sea siempre la misma, para poder reproducir los resultados
+# Datos que se pasan al ejecutar. Ejemplo: py nodos\sim_vib_01.py secuencial 5 10
+# Python guarda esas palabras en la lista sys.argv:
+#   sys.argv[0] -> el nombre del archivo
+#   sys.argv[1] -> modo (secuencial o paralelo), se usa para armar el run_id
+#   sys.argv[2] -> cuantas corridas enviar seguidas
+#   sys.argv[3] -> cuantas ventanas tiene cada corrida
+# Si no se pasa nada: 1 corrida de 10 ventanas con run_id "prueba_01"
+if len(sys.argv) > 1:     # ¿Escribiste algo despues del nombre del archivo?
+  modo = sys.argv[1]      # Si -> modo = "secuencial" (o "paralelo")
+else:
+  modo = "prueba"         # No -> usa "prueba"
+
+if len(sys.argv) > 2:          # ¿Escribiste un segundo dato?
+  corridas = int(sys.argv[2])  # Si -> corridas = 5 (int convierte el texto "5" en el numero 5)
+else:
+  corridas = 1                 # No -> manda 1 sola corrida
+
+if len(sys.argv) > 3:                      # ¿Escribiste un tercer dato?
+  ventanas_por_corrida = int(sys.argv[3])  # Si -> usa ese numero de ventanas
+else:
+  ventanas_por_corrida = 10                # No -> 10 ventanas por corrida, como pide el enunciado
+
+pausa_entre_corridas = 3  # Segundos de espera entre una corrida y la siguiente
+
+print(f"Modo: {modo} | Corridas: {corridas} | Ventanas por corrida: {ventanas_por_corrida}")
 
 def generar_onda(hz, frecuencia, amplitud, ruido):
   muestras = []
@@ -55,27 +79,39 @@ cliente.loop_start()
 # time.time() devuelve la hora actual en SEGUNDOS (ej: 1792366085.31)
 hora_inicio = time.time()
 
-for numero_ventana in range(1, ventanas_por_corrida + 1): # Genero 10 ventanas de datos, numeradas del 1 al 10
-  payload["sequence"] = numero_ventana    
-  segundos_transcurridos = time.time() - hora_inicio
-  payload["uptime_ms"] = int(segundos_transcurridos * 1000)
-  
-  if numero_ventana in [3, 7]: # Simulo que en la ventana 3 y 7 hay un evento de vibración más fuerte
-    payload["samples_g"] = generar_onda(hz, frecuencia, amplitud * factor_anomalia, ruido) # Genero una onda con el doble de amplitud para simular un evento de vibración más fuerte
-  else:
-    payload["samples_g"] = generar_onda(hz, frecuencia, amplitud, ruido) # Genero una onda normal
+for numero_corrida in range(1, corridas + 1):
+  payload["run_id"] = f"{modo}_{numero_corrida:02}" # Ejemplo: secuencial_01, secuencial_02 ... paralelo_05
 
-  # Envío el payload por MQTT
-  comprobante = cliente.publish(topic, json.dumps(payload))
-  comprobante.wait_for_publish() # Espero a que se publique el mensaje antes de continuar
+  # Reinicio la semilla en cada corrida: TODAS las corridas envian exactamente las mismas ventanas,
+  # asi los dos modos analizan los mismos datos y se pueden comparar
+  random.seed(42)
 
-  # Muestro un resumen corto en la terminal (lo que se PUBLICA sigue llevando las 100 muestras completas)
-  muestras = payload["samples_g"]
-  print(f"Ventana {payload['sequence']:2} | uptime {payload['uptime_ms']:5} ms | "
-        f"samples_g {muestras[:5]} ... ({len(muestras)} muestras) | "
-        f"min {min(muestras):+.3f} | max {max(muestras):+.3f}")
+  print(f"--- Corrida {payload['run_id']}: {ventanas_por_corrida} ventanas ---")
 
-  time.sleep(1)
+  for numero_ventana in range(1, ventanas_por_corrida + 1): # Genero las ventanas de la corrida, numeradas desde 1
+    payload["sequence"] = numero_ventana
+    segundos_transcurridos = time.time() - hora_inicio
+    payload["uptime_ms"] = int(segundos_transcurridos * 1000)
+
+    if numero_ventana in [3, 7]: # Simulo que en la ventana 3 y 7 hay un evento de vibración más fuerte
+      payload["samples_g"] = generar_onda(hz, frecuencia, amplitud * factor_anomalia, ruido) # Genero una onda con el doble de amplitud para simular un evento de vibración más fuerte
+    else:
+      payload["samples_g"] = generar_onda(hz, frecuencia, amplitud, ruido) # Genero una onda normal
+
+    # Envío el payload por MQTT
+    comprobante = cliente.publish(topic, json.dumps(payload))
+    comprobante.wait_for_publish() # Espero a que se publique el mensaje antes de continuar
+
+    # Muestro un resumen corto en la terminal (lo que se PUBLICA sigue llevando las 100 muestras completas)
+    muestras = payload["samples_g"]
+    print(f"Ventana {payload['sequence']:2} | uptime {payload['uptime_ms']:6} ms | "
+          f"samples_g {muestras[:5]} ... ({len(muestras)} muestras) | "
+          f"min {min(muestras):+.3f} | max {max(muestras):+.3f}")
+
+    time.sleep(1)
+
+  if numero_corrida < corridas:
+    time.sleep(pausa_entre_corridas) # Pequeña pausa para separar una corrida de la siguiente
 
 print("Deteniendo cliente MQTT...")
 cliente.disconnect()
