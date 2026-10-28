@@ -16,7 +16,7 @@ def on_message(client, userdata, message):
     if "samples_g" in mensaje:
         muestras = mensaje["samples_g"]
         print(f"""
-            # de Muestras: {len(muestras)}
+            Numero de Muestras: {len(muestras)}
             Muestra min: {min(muestras)}
             Muestra max: {max(muestras)}""")
     else:
