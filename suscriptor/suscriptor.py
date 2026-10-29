@@ -6,7 +6,7 @@ import os
 import sys
 import psutil
 from concurrent.futures import ProcessPoolExecutor
-from analisis import analizar_ventana
+from analisis import analizar_lote
 
 # Modo: py suscriptor\suscriptor.py secuencial  o  py suscriptor\suscriptor.py paralelo
 if len(sys.argv) > 1:
@@ -19,7 +19,7 @@ if MODO == "paralelo":
 else:
     TRABAJADORES = 1
 
-VENTANAS_POR_CORRIDA = 10
+LOTES_POR_CORRIDA = 10
 ARCHIVO_RESULTADOS = "resultados/resultados.csv"
 
 # Topics permitidos, con su node_id y sus campos obligatorios
@@ -118,9 +118,9 @@ def revisar_secuencia(mensaje):
     return True
 
 
-# Anota el tiempo de una ventana y cierra la corrida al llegar a 10
-def registrar_ventana(run_id, sequence, resultado, tiempo_ms):
-    # Primera ventana de la corrida
+# Anota el tiempo de un lote y cierra la corrida al llegar a 10
+def registrar_lote(run_id, sequence, resultado, tiempo_ms):
+    # Primer lote de la corrida
     if run_id not in corridas_en_curso:
         corridas_en_curso[run_id] = {"tiempos_ms": [], "anomalias": []}
         psutil.cpu_percent()  # Empieza a medir CPU
@@ -130,11 +130,11 @@ def registrar_ventana(run_id, sequence, resultado, tiempo_ms):
     if resultado["etiqueta"] == "anomalia":
         corrida["anomalias"].append(str(sequence))
 
-    print(f"[VENTANA] {run_id} | sequence {sequence:2} | RMS {resultado['rms']:.5f} | "
+    print(f"[LOTE] {run_id} | sequence {sequence:2} | RMS {resultado['rms']:.5f} | "
           f"pico {resultado['pico']:.5f} | desviacion {resultado['desviacion']:.5f} | "
           f"{resultado['etiqueta']:8} | {tiempo_ms:.3f} ms")
 
-    if len(corrida["tiempos_ms"]) == VENTANAS_POR_CORRIDA:
+    if len(corrida["tiempos_ms"]) == LOTES_POR_CORRIDA:
         cerrar_corrida(run_id)
 
 
@@ -147,7 +147,7 @@ def cerrar_corrida(run_id):
     anomalias = " ".join(corrida["anomalias"])  # ["3", "7"] -> "3 7"
 
     print(f"\n===== RESUMEN {run_id} =====")
-    print(f"  Mediana: {mediana_ms} ms/ventana | CPU promedio: {cpu} % | Ventanas con anomalia: {anomalias}\n")
+    print(f"  Mediana: {mediana_ms} ms/lote | CPU promedio: {cpu} % | Lotes con anomalia: {anomalias}\n")
 
     with open(ARCHIVO_RESULTADOS, "a") as archivo:  # "a" = agregar al final
         archivo.write(f"{MODO},{TRABAJADORES},{run_id},{mediana_ms},{cpu},{anomalias}\n")
@@ -167,14 +167,14 @@ def on_message(client, userdata, message):
 
     if "samples_g" in mensaje:
         if MODO == "paralelo":
-            tarea = pool.submit(analizar_ventana, mensaje["samples_g"])  # Se la manda a un trabajador
+            tarea = pool.submit(analizar_lote, mensaje["samples_g"])  # Se la manda a un trabajador
             resultado = tarea.result()  # Espera el resultado del trabajador
         else:
-            resultado = analizar_ventana(mensaje["samples_g"])  # Se analiza aqui mismo
+            resultado = analizar_lote(mensaje["samples_g"])  # Se analiza aqui mismo
         fin = time.perf_counter()  # Cronometro: termina el analisis
 
         tiempo_ms = (fin - inicio) * 1000
-        registrar_ventana(mensaje["run_id"], mensaje["sequence"], resultado, tiempo_ms)
+        registrar_lote(mensaje["run_id"], mensaje["sequence"], resultado, tiempo_ms)
     else:
         print(f"[AMBIENTE]  {mensaje['node_id']} | sequence {mensaje['sequence']:2} | "
               f"temperatura {mensaje['temperature_c']} °C | humedad {mensaje['humidity_pct']} % | "
@@ -184,7 +184,7 @@ def on_message(client, userdata, message):
 if __name__ == "__main__":
     if MODO == "paralelo":
         pool = ProcessPoolExecutor(max_workers=TRABAJADORES)  # Crea los 4 trabajadores
-        pool.submit(analizar_ventana, [0.0]).result()  # Los arranca antes de que lleguen mensajes
+        pool.submit(analizar_lote, [0.0]).result()  # Los arranca antes de que lleguen mensajes
 
     cliente = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
     cliente.on_message = on_message
@@ -195,9 +195,9 @@ if __name__ == "__main__":
     if not os.path.exists(ARCHIVO_RESULTADOS):
         os.makedirs("resultados", exist_ok=True)
         with open(ARCHIVO_RESULTADOS, "w") as archivo:
-            archivo.write("modo,trabajadores,run_id,mediana_ms,cpu_pct,ventanas_anomalas\n")
+            archivo.write("modo,trabajadores,run_id,mediana_ms,cpu_pct,lotes_anomalos\n")
 
-    print(f"Suscriptor en modo {MODO} | {TRABAJADORES} trabajadores | {VENTANAS_POR_CORRIDA} ventanas por corrida")
+    print(f"Suscriptor en modo {MODO} | {TRABAJADORES} trabajadores | {LOTES_POR_CORRIDA} lotes por corrida")
     print("Escuchando emergentes/microinvernadero/# ... (Ctrl+C para salir)")
     try:
         cliente.loop_forever()
