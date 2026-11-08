@@ -99,6 +99,22 @@ async def medir(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"Lectura manual registrada: {temperatura:g} °C, {humedad:g} % HR.")  # :g quita el .0 sobrante
 
 
+# Convierte una lectura en texto; si la cajita está vacía, simplemente digo que no hay datos
+def describir(lectura):
+    if lectura is None:
+        return "sin datos todavía"
+    else:
+        return f"{lectura['temperatura']:g} °C, {lectura['humedad']:g} % HR"
+
+
+# Responde /estado: muestra cada fuente por separado, sin mezclarlas
+async def estado(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        f"Última lectura MQTT: {describir(lecturas['mqtt'])}\n"
+        f"Última lectura Telegram: {describir(lecturas['telegram'])}"
+    )
+
+
 # Arranque del programa
 
 # 1. Prendo MQTT primero y lo dejo trabajando por detrás
@@ -113,6 +129,7 @@ app = ApplicationBuilder().token(TOKEN).build()
 solo_yo = filters.Chat(chat_id=CHAT_AUTORIZADO)  # Si me escribe otra persona, la ignoro
 app.add_handler(CommandHandler("ayuda", ayuda, filters=solo_yo))
 app.add_handler(CommandHandler("medir", medir, filters=solo_yo))
+app.add_handler(CommandHandler("estado", estado, filters=solo_yo))
 
 print(f"Programa central escuchando MQTT en {TOPIC_AMBIENTE} y Telegram. Ctrl+C para salir.")
 
