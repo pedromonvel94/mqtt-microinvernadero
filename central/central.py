@@ -1,5 +1,6 @@
 import os
 import json
+import math
 import paho.mqtt.client as mqtt
 from dotenv import load_dotenv
 from telegram import Update
@@ -19,7 +20,7 @@ lecturas = {
 }
 
 
-# ---------- Ruta 1: MQTT (automática) ----------
+# Ruta 1: MQTT (automática)
 
 # Esta función se ejecuta sola cada vez que sim_ambiente_01 publica algo
 def on_message(client, userdata, message):
@@ -34,7 +35,7 @@ def on_message(client, userdata, message):
         print("[MQTT] Me llegó un mensaje dañado o incompleto, lo ignoro")  # Así el programa no se cae
 
 
-# ---------- Ruta 2: Telegram (manual) ----------
+# Ruta 2: Telegram (manual)
 
 # Responde /ayuda con los comandos que tengo
 async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -46,7 +47,59 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# ---------- Arranque del programa ----------
+# Convierte el texto a número; si no se puede, devuelve None
+def convertir_numero(texto):
+    try:
+        return float(texto)
+    except ValueError:
+        return None
+
+
+# Responde /medir: valida la temperatura y la humedad y, si todo está bien, las guarda en la cajita de Telegram
+async def medir(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    partes = context.args  # Las palabras que escribí después de /medir. Ej: ["24.5", "68"]
+
+    # 1. ¿Escribí exactamente dos valores?
+    if len(partes) != 2:
+        await update.message.reply_text("Error: debes enviar dos valores. Uso: /medir <temperatura> <humedad>. Ej: /medir 24.5 68")
+        return
+
+    temperatura = convertir_numero(partes[0])
+    humedad = convertir_numero(partes[1])
+
+    # 2. ¿La temperatura es un número?
+    if temperatura is None:
+        await update.message.reply_text(f"Error: la temperatura '{partes[0]}' no es un número. Usa punto para los decimales. Ej: 24.5")
+        return
+
+    # 3. ¿La humedad es un número?
+    if humedad is None:
+        await update.message.reply_text(f"Error: la humedad '{partes[1]}' no es un número. Usa punto para los decimales. Ej: 68")
+        return
+
+    # 4. ¿Son finitos? float() acepta "nan" e "inf", por eso lo reviso aparte
+    if not math.isfinite(temperatura):
+        await update.message.reply_text("Error: la temperatura debe ser un número finito (no se acepta nan ni inf).")
+        return
+    if not math.isfinite(humedad):
+        await update.message.reply_text("Error: la humedad debe ser un número finito (no se acepta nan ni inf).")
+        return
+
+    # 5. ¿La humedad está entre 0 y 100?
+    if humedad < 0 or humedad > 100:
+        await update.message.reply_text(f"Error: la humedad debe estar entre 0 y 100. Enviaste {humedad:g}.")
+        return
+
+    # Si llegué hasta aquí todo está bien: guardo la lectura (solo en la cajita de Telegram)
+    lecturas["telegram"] = {
+        "temperatura": temperatura,
+        "humedad": humedad
+    }
+    print(f"[TELEGRAM] {lecturas['telegram']}")
+    await update.message.reply_text(f"Lectura manual registrada: {temperatura:g} °C, {humedad:g} % HR.")  # :g quita el .0 sobrante
+
+
+# Arranque del programa
 
 # 1. Prendo MQTT primero y lo dejo trabajando por detrás
 cliente = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
@@ -59,6 +112,7 @@ cliente.loop_start()  # Con loop_start MQTT corre en segundo plano y el programa
 app = ApplicationBuilder().token(TOKEN).build()
 solo_yo = filters.Chat(chat_id=CHAT_AUTORIZADO)  # Si me escribe otra persona, la ignoro
 app.add_handler(CommandHandler("ayuda", ayuda, filters=solo_yo))
+app.add_handler(CommandHandler("medir", medir, filters=solo_yo))
 
 print(f"Programa central escuchando MQTT en {TOPIC_AMBIENTE} y Telegram. Ctrl+C para salir.")
 
